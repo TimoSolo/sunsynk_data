@@ -7,14 +7,63 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# API settings
-API_URL_TEMPLATE = "https://api.sunsynk.net/api/v1/plant/energy/{id}/month?lan=en&date={date}&id={id}"
-BEARER_TOKEN = os.getenv("BEARER_TOKEN")
+USERNAME = os.getenv("USERNAME")
+PASSWORD = os.getenv("PASSWORD")
+BEARER_TOKEN = None
+PLANT_ID = os.getenv("PLANT_ID") # eg "306756"  Replace with your plant ID, not sure how to get the plant ID from API yet
 
-# Headers for API request
-headers = {
-    "Authorization": f"Bearer {BEARER_TOKEN}"
-}
+def get_bearer_token():
+    global BEARER_TOKEN
+    if BEARER_TOKEN:
+        return BEARER_TOKEN
+
+    url = "https://api.sunsynk.net/oauth/token"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "areaCode": "sunsynk",
+        "client_id": "csp-web",
+        "grant_type": "password",
+        "source": "sunsynk",
+        "username": USERNAME,
+        "password": PASSWORD
+    }
+    print("Logging in to Sunsynk as " + USERNAME + "...")
+    response = requests.post(url, json=payload, headers=headers)
+    if response.status_code == 200:
+        response_data = response.json()
+        if response_data.get('success') and 'data' in response_data:
+            print("Login successful")
+            BEARER_TOKEN = response_data['data'].get('access_token')
+            return BEARER_TOKEN
+        else:
+            raise Exception("Login failed or access token not found in response")
+    else:
+        response_data = response.json()
+        error_message = response_data.get('msg', 'Failed to retrieve bearer token')
+        raise Exception(error_message)
+    
+def fetch_plant_id():
+    """
+    Fetches the plant ID.
+    :return: Plant ID
+    """
+    print("Fetching plant information...")
+    global BEARER_TOKEN
+    headers = {
+        "Authorization": f"Bearer {BEARER_TOKEN}"
+    }
+    url = "https://api.sunsynk.net/api/v1/plants?page=1&limit=1"
+    response = requests.get(url, headers=headers)
+    if response.status_code == 200:
+        response_data = response.json()
+        if response_data.get('msg') == "Success" and 'infos' in response_data['data']:
+            plant_info = response_data['data']['infos'][0]  # Get the first plant info
+            print(f"Found plant: {plant_info['name']} {plant_info['id']}")
+            return plant_info['id']
+        else:
+            raise Exception("Failed to fetch plant information or plant information not found in response")
+    else:
+        raise Exception("Failed to retrieve plant information")
 
 def fetch_data_for_month(id, date):
     """
@@ -23,13 +72,16 @@ def fetch_data_for_month(id, date):
     :param date: Date in the format YYYY-MM
     :return: JSON response from the API
     """
-    url = API_URL_TEMPLATE.format(id=id, date=date)
+    headers = {
+        "Authorization": f"Bearer {get_bearer_token()}"
+    }
+    url = f"https://api.sunsynk.net/api/v1/plant/energy/{id}/month?lan=en&date={date}&id={id}"
     response = requests.get(url, headers=headers)
     if response.status_code == 200 and response.json().get('data'):
         return response.json()['data']['infos']
     else:
         return None
-    
+
 def fetch_data_for_day(id, date):
     """
     Fetches data for a given day.
@@ -37,8 +89,10 @@ def fetch_data_for_day(id, date):
     :param date: Date in the format YYYY-MM-DD
     :return: JSON response from the API
     """
-    daily_url_template = "https://api.sunsynk.net/api/v1/plant/energy/{id}/day?lan=en&date={date}&id={id}"
-    url = daily_url_template.format(id=id, date=date)
+    headers = {
+        "Authorization": f"Bearer {get_bearer_token()}"
+    }
+    url = f"https://api.sunsynk.net/api/v1/plant/energy/{id}/day?lan=en&date={date}&id={id}"
     response = requests.get(url, headers=headers)
     if response.status_code == 200 and response.json().get('data'):
         return response.json()['data']['infos']
@@ -64,7 +118,7 @@ def process_data(data, is_daily=False):
                         time = f"{date} {record['time']}"
                     else:
                         # For monthly data, use the date as is
-                        time = date
+                        time = f"{record['time']}"
 
                     value = float(record['value'])
                     if time not in processed_data:
@@ -76,11 +130,17 @@ def process_data(data, is_daily=False):
     return df
 
 def main():
-    id = "227328" # "306756" <-- Tim # Your Plant ID
+    global BEARER_TOKEN, PLANT_ID
+    # Login to get the bearer token
+    get_bearer_token()
+
+    # Fetch the plant ID
+    PLANT_ID = fetch_plant_id()
+    id = PLANT_ID
     monthly_data = []
     daily_data = []
 
-    # Start with monthly data collection
+    # Monthly data collection
     current_month = datetime.now()
     while True:
         month_str = current_month.strftime("%Y-%m")
@@ -94,10 +154,7 @@ def main():
             print("No more monthly data found.")
             break
 
-    # Process monthly data
-    df_monthly = process_data(monthly_data)
-    
-    # Continue with daily data collection
+    # Daily data collection
     current_day = datetime.now()
     while True:
         day_str = current_day.strftime("%Y-%m-%d")
@@ -110,11 +167,13 @@ def main():
             print("No more daily data found.")
             break
 
-    # Process daily data
-    df_daily = process_data(daily_data, True)
+    # Processing data
+    df_monthly = process_data(monthly_data, is_daily=False)
+    df_daily = process_data(daily_data, is_daily=True)
 
-    # Export to Excel with two sheets
-    excel_filename = "solar_data_history.xlsx"
+    # Exporting to Excel
+    current_datetime = datetime.now().strftime("%Y%m%d_%H%M%S")
+    excel_filename = f"solar_data_history_{PLANT_ID}_{current_datetime}.xlsx"
     with pd.ExcelWriter(excel_filename, engine='openpyxl') as writer:
         df_monthly.to_excel(writer, sheet_name='Monthly Data')
         df_daily.to_excel(writer, sheet_name='Daily Data')
